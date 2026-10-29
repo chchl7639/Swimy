@@ -44,17 +44,21 @@ class OverlayService : Service() {
 
     // ───── 문구 ─────
     private val phrases = listOf("안녕! 나 여기 있어~", "간질간질해, 헤헤", "오늘도 같이 힘내자!")
-    // 1초 안에 3번 이상 연속 터치했을 때
-    private val shyPhrases = listOf("으앗, 너무 간지러워!", "그만그만~ 어지러워!", "하하, 살려줘~")
+    // 0.5초 안에 3번 이상 연속 터치했을 때 (떼쓰기)
+    private val whinePhrases = listOf("아앙~ 그만해~ 어지럽단 말이야!", "으아앙~ 어지러워어~ 그만~!", "싫어싫어~ 간지러워서 어지러워!")
     // 집은 채 빠르게 흔들었을 때
     private val tiredPhrases = listOf("으으… 어지러워 😵", "그만~ 멀미 나…", "으아… 힘들어…")
-    // 집은 채 한~두 바퀴 돌렸을 때
-    private val spinPhrases = listOf("우와~ 빙글빙글!", "어어~ 세상이 돈다~", "신난다~ 하하!")
+    // 집은 채 한 바퀴 돌렸을 때 (또 해달라고 조르기)
+    private val spinPhrases = listOf("우와~ 신난다! 또 해줘, 또또!", "한 번만 더~ 제발~ 응?", "빙글빙글 재밌어! 한 번 더~")
+    // 그네 태우듯 약하게 흔들어 줬을 때
+    private val swingPhrases = listOf("우와~ 그네 타는 것 같아! 씽씽~ 😆", "높이높이~ 너무 좋아!", "헤헤, 살랑살랑~ 기분 좋아 🥰")
     // 그 이상 돌리거나 너무 많이 흔들었을 때
     private val sickPhrase = "우웩… 🤮"
     // 내려놓았을 때
     private val reliefPhrase = "휴… 살았다"
     private val staggerPhrase = "으으… 세상이 빙글빙글…"
+    private val againPhrase = "한 번만 더 돌려줘~ 응? 응?"        // 한 바퀴 돌리고 내려놓았을 때
+    private val happyEndPhrase = "재밌었다~ 또 태워줘!"            // 그네 탄 뒤 내려놓았을 때
 
     // ───── 설정 (여기 값만 바꿔도 느낌이 달라져요) ─────
     private val swimiColor = Color.parseColor("#6C8CFF")
@@ -71,8 +75,12 @@ class OverlayService : Service() {
     private val stretchMax = 0.32f      // 빠르게 움직일 때 늘어나는 최대 비율
     private val shakeDistDp = 500f      // 0.5초 동안 손가락이 움직인 거리가 이 값을 넘으면 '힘들어함'
     private val sickShakeTotalDp = 3500f // 집은 채 흔든 총 거리가 이 값을 넘으면 '토'
-    private val spinLightTurns = 1f     // 이 바퀴 수부터 가벼운 멘트
+    private val spinLightTurns = 1f     // 이 바퀴 수부터 또 해달라고 조름
     private val spinSickTurns = 2.5f    // 이 바퀴 수부터 토
+    private val tapWindowMs = 500L      // 마지막 터치 후 이 시간이 지나면 터치 횟수로 반응 결정
+    private val swingMinRad = 0.2f      // 그네 감지: 좌우로 이 각도 이상(약 11°)
+    private val swingMaxRad = 1.3f      // 그네 감지: 이 각도 이하(약 75°)여야 '약하게'
+    private val swingNeed = 4           // 그네 감지: 반대편으로 이 횟수만큼 왕복(편도 기준)
 
     // ───── 내부 상태 ─────
     private lateinit var wm: WindowManager
@@ -102,12 +110,18 @@ class OverlayService : Service() {
     private var lastMy = 0f
     private var fx = 0f              // 손가락 위치(화면 좌표)
     private var fy = 0f
-    private val tapTimes = mutableListOf<Long>()
+    private var pendingTaps = 0
     private val shakeLog = mutableListOf<Pair<Long, Float>>()
     private var shakeTotal = 0f
     private var tired = false
     private var dizzyLevel = 0       // 0 없음 / 1 한~두 바퀴 / 2 심함
     private var lastTiredAt = 0L
+    private var lastHappyAt = 0L
+    private var happy = false
+    private var prevOmega = 0f       // 그네 감지용
+    private var swingCount = 0
+    private var lastTurnSign = 0
+    private var lastTurnMs = 0L
 
     // 진자 물리
     private var px = 0f              // 받침점 위치
@@ -148,6 +162,7 @@ class OverlayService : Service() {
     private val walkRunnable = Runnable { walkOnce() }
     private val hideBubble = Runnable { bubble?.visibility = View.INVISIBLE }
     private val holdRunnable = Runnable { if (touching && !dragging) beginDrag() }
+    private val tapDecideRunnable = Runnable { decideTaps() }
     private val frameCb = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!dragging || !alive) return
@@ -457,6 +472,12 @@ class OverlayService : Service() {
         shakeTotal = 0f
         dizzyLevel = 0
         tired = false
+        happy = false
+        prevOmega = 0f
+        swingCount = 0
+        lastTurnSign = 0
+        pendingTaps = 0
+        handler.removeCallbacks(tapDecideRunnable)
         lastFrameNs = System.nanoTime()
 
         // 구는 손가락 아래에 그대로, 그림자만 일정 거리 아래로 멀어짐
@@ -516,6 +537,7 @@ class OverlayService : Service() {
         }
         val turns = abs(theta - spinRef) / (2f * Math.PI.toFloat())
         if (turns >= spinSickTurns) raiseDizzy(2) else if (turns >= spinLightTurns) raiseDizzy(1)
+        detectSwing(SystemClock.uptimeMillis())
 
         // 구(추)의 위치 → 창 위치
         val bx = px + rope * sin(theta)
@@ -556,8 +578,10 @@ class OverlayService : Service() {
 
         val level = dizzyLevel
         val wasTired = tired
+        val wasHappy = happy
         tired = false
         dizzyLevel = 0
+        happy = false
 
         if (wasTired || level > 0) {
             // 심했으면 잠깐 처진 채로 있다가 천천히 회복
@@ -577,8 +601,16 @@ class OverlayService : Service() {
                 say(staggerPhrase)
                 stagger()
             }
-            wasTired || level == 1 -> {           // 적당히: 휴 살았다
+            level == 1 -> {                       // 한 바퀴쯤: 또 해달라고 조름
+                say(againPhrase)
+                bounce()
+            }
+            wasTired -> {                         // 빠르게 흔들었을 때: 휴 살았다
                 say(reliefPhrase)
+                bounce()
+            }
+            wasHappy -> {                         // 그네 탄 뒤: 또 태워달라고
+                say(happyEndPhrase)
                 bounce()
             }
             else -> bounce()                      // 그냥 내려놓음
@@ -620,6 +652,48 @@ class OverlayService : Service() {
         }
     }
 
+    // 그네 감지: 약하게 좌우로 몇 번 왕복하면 좋아함
+    private fun detectSwing(nowMs: Long) {
+        if (prevOmega * omega < 0f) {            // 방향이 바뀌는 순간 = 가장 멀리 간 순간
+            val twoPi = (2 * Math.PI).toFloat()
+            val w = theta - twoPi * Math.round(theta / twoPi).toFloat()  // 여러 바퀴 돈 뒤에도 -π..π로 환산
+            val sign = if (w > 0f) 1 else -1
+            val ok = abs(w) in swingMinRad..swingMaxRad
+            if (ok && sign != lastTurnSign && nowMs - lastTurnMs < 1300L) {
+                swingCount++
+            } else {
+                swingCount = if (ok) 1 else 0
+            }
+            lastTurnSign = if (ok) sign else 0
+            lastTurnMs = nowMs
+            if (swingCount >= swingNeed && dizzyLevel == 0 && !tired && nowMs - lastHappyAt > 5000L) {
+                swingCount = 0
+                onHappySwing(nowMs)
+            }
+        }
+        prevOmega = omega
+    }
+
+    private fun onHappySwing(now: Long) {
+        lastHappyAt = now
+        happy = true
+        say(swingPhrases[Random.nextInt(swingPhrases.size)])
+        joyHop()
+    }
+
+    // 신나서 콩콩
+    private fun joyHop() {
+        val up = -dp(9f)
+        val ty = PropertyValuesHolder.ofKeyframe(
+            View.TRANSLATION_Y,
+            Keyframe.ofFloat(0f, 0f), Keyframe.ofFloat(0.25f, up), Keyframe.ofFloat(0.5f, 0f),
+            Keyframe.ofFloat(0.75f, up), Keyframe.ofFloat(1f, 0f)
+        )
+        ObjectAnimator.ofPropertyValuesHolder(sphere, ty).apply {
+            duration = 700
+        }.start()
+    }
+
     // 몸이 납작하게 처짐
     private fun droop(heavy: Boolean) {
         val sx = if (heavy) 1.16f else 1.1f
@@ -647,20 +721,36 @@ class OverlayService : Service() {
     }
 
     // ───── 짧게 눌렀을 때 ─────
-    // 1초 안에 3번 이상이면 특별 반응
+    // 누를 때마다 살짝 통통, 마지막 터치 후 0.5초 동안 더 안 누르면 횟수로 반응 결정
     private fun onTap() {
-        val now = SystemClock.uptimeMillis()
-        tapTimes.removeAll { now - it > 1000L }
-        tapTimes.add(now)
-        if (tapTimes.size >= 3) {
-            lastShy = pickIndex(shyPhrases.size, lastShy)
-            say(shyPhrases[lastShy])
-            shake()
-            bounce()
-        } else {
-            lastPhrase = pickIndex(phrases.size, lastPhrase)
-            say(phrases[lastPhrase])
-            bounce()
+        pendingTaps++
+        bounce()
+        handler.removeCallbacks(tapDecideRunnable)
+        handler.postDelayed(tapDecideRunnable, tapWindowMs)
+    }
+
+    private fun decideTaps() {
+        val n = pendingTaps
+        pendingTaps = 0
+        when {
+            n >= 3 -> {                           // 3번 이상: 어지럽다고 떼쓰기
+                lastShy = pickIndex(whinePhrases.size, lastShy)
+                say(whinePhrases[lastShy])
+                shake()
+            }
+            n == 2 -> openChat()                  // 2번: 대화창 열기
+            else -> {                             // 1번: 기본 문구
+                lastPhrase = pickIndex(phrases.size, lastPhrase)
+                say(phrases[lastPhrase])
+            }
+        }
+    }
+
+    private fun openChat() {
+        try {
+            startActivity(Intent(this, ChatActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) {
+            say("앗, 대화창이 안 열려… 앱에서 다시 해줘!")
         }
     }
 
