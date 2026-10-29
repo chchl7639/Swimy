@@ -23,6 +23,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.DisplayMetrics
+import android.view.Choreographer
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -34,6 +35,7 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.sin
 import kotlin.random.Random
@@ -42,12 +44,19 @@ class OverlayService : Service() {
 
     // ───── 설정 (여기 값만 바꿔도 느낌이 달라져요) ─────
     private val phrases = listOf("안녕! 나 여기 있어~", "간질간질해, 헤헤", "오늘도 같이 힘내자!")
-    // 1초 안에 3번 이상 연속 터치했을 때 나오는 문구
+    // 1초 안에 3번 이상 연속 터치했을 때
     private val shyPhrases = listOf("으앗, 너무 간지러워!", "그만그만~ 어지러워!", "하하, 살려줘~")
+    // 집은 채 빠르게 흔들었을 때 / 놓았을 때
+    private val tiredPhrases = listOf("으으… 어지러워 😵", "그만~ 멀미 나…", "으아… 힘들어…")
+    private val reliefPhrase = "휴… 살았다"
+
     private val swimiColor = Color.parseColor("#6C8CFF")
     private val sizeDp = 64
     private val speedDpPerSec = 70f
     private val bubbleMs = 2000L
+    private val ropeDp = 34f        // 진자 줄 길이: 길수록 느리고 크게 흔들려요
+    private val liftDp = 12f        // 집었을 때 떠오르는 높이
+    private val shakeDistDp = 500f  // 0.5초 동안 손가락이 움직인 거리가 이 값을 넘으면 '힘들어함'
 
     // ───── 내부 상태 ─────
     private lateinit var wm: WindowManager
@@ -58,31 +67,64 @@ class OverlayService : Service() {
     private lateinit var bubbleLp: WindowManager.LayoutParams
     private lateinit var walkLayer: FrameLayout
     private lateinit var sphere: View
+    private lateinit var shadow: View
     private var walkAnim: ValueAnimator? = null
     private var moveAnim: ValueAnimator? = null
     private var lastPhrase = -1
     private var lastShy = -1
-    private var dragging = false
-    private var downRawX = 0f
-    private var downRawY = 0f
-    private var startWinX = 0
-    private var startWinY = 0
-    private val tapTimes = mutableListOf<Long>()
-    private val touchSlop by lazy { ViewConfiguration.get(this).scaledTouchSlop }
     private var alive = true
     private var screenW = 0
     private var screenH = 0
 
+    // 터치 / 드래그
+    private var touching = false
+    private var dragging = false
+    private var downRawX = 0f
+    private var downRawY = 0f
+    private var lastMx = 0f
+    private var lastMy = 0f
+    private var fx = 0f              // 손가락 위치(화면 좌표)
+    private var fy = 0f
+    private val tapTimes = mutableListOf<Long>()
+    private val shakeLog = mutableListOf<Pair<Long, Float>>()
+    private var tired = false
+    private var lastTiredAt = 0L
+    private val touchSlop by lazy { ViewConfiguration.get(this).scaledTouchSlop }
+
+    // 진자 물리
+    private var px = 0f              // 받침점(손가락 쪽) 위치
+    private var py = 0f
+    private var pvx = 0f             // 받침점 속도
+    private var pvy = 0f
+    private var pax = 0f             // 받침점 가속도 (부드럽게 다듬은 값)
+    private var pay = 0f
+    private var theta = 0f           // 줄 각도 (0 = 바로 아래)
+    private var omega = 0f           // 각속도
+    private var holdT = 0f           // 집어올림 진행도 0..1
+    private var o0x = 0f
+    private var o0y = 0f
+    private var lastFrameNs = 0L
+
     private val density by lazy { resources.displayMetrics.density }
     private fun dp(v: Float): Float = v * density
     private fun dpi(v: Int): Int = (v * density).toInt()
-    private val topRoom: Int get() = dpi(32) // 튀어오를 때 쓰는 위쪽 여유 공간
-    private val sidePad: Int get() = dpi(12) // 좌우 여유 공간 (찌그러질 때 옆으로 퍼지는 만큼)
+    private val topRoom: Int get() = dpi(32)     // 튀어오를 때 쓰는 위쪽 여유 공간
+    private val bottomRoom: Int get() = dpi(12)  // 그림자 공간
+    private val sidePad: Int get() = dpi(12)     // 좌우 여유 공간
     private val winW: Int get() = dpi(sizeDp) + sidePad * 2
+    private val winH: Int get() = dpi(sizeDp) + topRoom + bottomRoom
     private fun rand(a: Float, b: Float): Float = a + Random.nextFloat() * (b - a)
 
     private val walkRunnable = Runnable { walkOnce() }
     private val hideBubble = Runnable { bubble?.visibility = View.INVISIBLE }
+    private val holdRunnable = Runnable { if (touching && !dragging) beginDrag() }
+    private val frameCb = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!dragging || !alive) return
+            stepPhysics(frameTimeNanos)
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -106,6 +148,7 @@ class OverlayService : Service() {
     override fun onDestroy() {
         alive = false
         handler.removeCallbacksAndMessages(null)
+        Choreographer.getInstance().removeFrameCallback(frameCb)
         moveAnim?.cancel()
         walkAnim?.cancel()
         petRoot?.let { wm.removeView(it) }
@@ -154,7 +197,12 @@ class OverlayService : Service() {
 
     // 위쪽은 상태바+말풍선 공간, 아래쪽은 내비게이션 바 공간을 비워 둠
     private fun clampY(y: Float): Float =
-        clampRange(y, dp(110f), screenH - dpi(sizeDp) - topRoom - dp(120f))
+        clampRange(y, dp(110f), screenH - winH - dp(120f))
+
+    private fun ovalBg(color: Int) = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(color)
+    }
 
     private fun createViews() {
         updateScreen()
@@ -163,25 +211,34 @@ class OverlayService : Service() {
         val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
 
+        // 바닥 그림자
+        shadow = View(this).apply { background = ovalBg(Color.parseColor("#33000000")) }
         // 구 (단색 원)
         sphere = View(this).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(swimiColor)
-            }
+            background = ovalBg(swimiColor)
             pivotX = size / 2f
             pivotY = size.toFloat()
         }
-        // 걷기 애니메이션은 이 레이어, 터치 반응은 구 자체에 적용
+        // 걷기/떠오르기/처짐은 이 레이어, 통통/파르르는 구 자체에 적용
         walkLayer = FrameLayout(this).apply {
             addView(sphere, FrameLayout.LayoutParams(size, size))
             pivotX = size / 2f
-            pivotY = size / 2f
+            pivotY = size.toFloat()
             clipChildren = false
         }
+        val center = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         val root = FrameLayout(this).apply {
             clipChildren = false
-            addView(walkLayer, FrameLayout.LayoutParams(size, size, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+            addView(
+                shadow,
+                FrameLayout.LayoutParams((size * 0.75f).toInt(), dpi(10), center).apply {
+                    bottomMargin = bottomRoom - dpi(5)
+                }
+            )
+            addView(
+                walkLayer,
+                FrameLayout.LayoutParams(size, size, center).apply { bottomMargin = bottomRoom }
+            )
             setOnTouchListener { _, e ->
                 when (e.actionMasked) {
                     MotionEvent.ACTION_DOWN -> onTouchDown(e)
@@ -194,7 +251,7 @@ class OverlayService : Service() {
         }
         petRoot = root
 
-        petLp = WindowManager.LayoutParams(winW, size + topRoom, type, flags, PixelFormat.TRANSLUCENT).apply {
+        petLp = WindowManager.LayoutParams(winW, winH, type, flags, PixelFormat.TRANSLUCENT).apply {
             gravity = Gravity.TOP or Gravity.START
             x = (screenW - winW) / 2
             y = clampY(screenH / 2f).toInt()
@@ -231,7 +288,7 @@ class OverlayService : Service() {
     }
 
     private fun walkOnce() {
-        if (dragging) {
+        if (dragging || touching) {
             scheduleMove()
             return
         }
@@ -293,50 +350,166 @@ class OverlayService : Service() {
         walkLayer.translationY = 0f
     }
 
-    // ───── 터치 반응 ─────
+    // ───── 터치 처리 ─────
     private fun onTouchDown(e: MotionEvent) {
         moveAnim?.cancel()                        // 걷던 중이면 멈춤
         handler.removeCallbacks(walkRunnable)     // 만지는 동안은 자동 이동 보류
+        fx = e.rawX
+        fy = e.rawY
         downRawX = e.rawX
         downRawY = e.rawY
-        startWinX = petLp.x
-        startWinY = petLp.y
+        lastMx = e.rawX
+        lastMy = e.rawY
+        shakeLog.clear()
+        touching = true
         dragging = false
+        handler.postDelayed(holdRunnable, 250L)   // 꾹 누르면 집어올림
     }
 
     private fun onTouchMove(e: MotionEvent) {
-        val dx = e.rawX - downRawX
-        val dy = e.rawY - downRawY
-        if (!dragging && hypot(dx, dy) > touchSlop) {
-            dragging = true
-            updateScreen()
-        }
-        if (dragging) dragTo(startWinX + dx, startWinY + dy)
+        fx = e.rawX
+        fy = e.rawY
+        if (!dragging && hypot(fx - downRawX, fy - downRawY) > touchSlop) beginDrag()
+        if (dragging) trackShake(e)
+        lastMx = fx
+        lastMy = fy
     }
 
     private fun onTouchUp() {
-        if (dragging) {
-            dragging = false
-            bounce()                              // 놓았을 때 살짝 통
-        } else {
-            onTap()
-        }
+        touching = false
+        handler.removeCallbacks(holdRunnable)
+        if (dragging) endDrag() else onTap()
         scheduleMove()
     }
 
     private fun onTouchCancel() {
-        dragging = false
+        touching = false
+        handler.removeCallbacks(holdRunnable)
+        if (dragging) endDrag()
         scheduleMove()
     }
 
-    private fun dragTo(x: Float, y: Float) {
-        petLp.x = clampX(x).toInt()
-        petLp.y = clampRange(y, 0f, (screenH - dpi(sizeDp) - topRoom).toFloat()).toInt()
+    // ───── 집어올리기 + 진자운동 ─────
+    private fun beginDrag() {
+        if (dragging) return
+        dragging = true
+        handler.removeCallbacks(holdRunnable)
+        updateScreen()
+
+        // 지금 구의 중심에서 시작해 부드럽게 손가락 아래로 매달리도록 초기값 계산
+        val rope = dp(ropeDp)
+        val cx = petLp.x + winW / 2f
+        val cy = petLp.y + topRoom + dpi(sizeDp) / 2f
+        o0x = cx - fx
+        o0y = cy - fy - rope
+        px = cx
+        py = cy - rope
+        pvx = 0f
+        pvy = 0f
+        pax = 0f
+        pay = 0f
+        theta = 0f
+        omega = 0f
+        holdT = 0f
+        lastFrameNs = System.nanoTime()
+
+        // 떠오르기 + 그림자는 옅고 작아짐
+        walkLayer.animate().translationY(-dp(liftDp)).setDuration(150).start()
+        shadow.animate().alpha(0.55f).scaleX(0.85f).setDuration(150).start()
+
+        Choreographer.getInstance().postFrameCallback(frameCb)
+    }
+
+    private fun stepPhysics(nowNs: Long) {
+        var dt = (nowNs - lastFrameNs) / 1_000_000_000f
+        lastFrameNs = nowNs
+        if (dt <= 0f) return
+        if (dt > 0.033f) dt = 0.033f
+
+        // 받침점 목표 = 손가락 + 오프셋 (처음엔 구 위치에서 시작해 손가락 아래로 이동)
+        val rope = dp(ropeDp)
+        holdT = (holdT + dt / 0.15f).coerceAtMost(1f)
+        val e = holdT * holdT * (3f - 2f * holdT)
+        val tx = fx + o0x * (1f - e)
+        val ty = fy + o0y + (-rope - o0y) * e
+
+        // 받침점을 살짝 부드럽게 따라오게 해서 속도/가속도를 얻음
+        val follow = 1f - exp(-dt * 28f)
+        val nx = px + (tx - px) * follow
+        val ny = py + (ty - py) * follow
+        val vx = (nx - px) / dt
+        val vy = (ny - py) / dt
+        val ax = (vx - pvx) / dt
+        val ay = (vy - pvy) / dt
+        px = nx
+        py = ny
+        pvx = vx
+        pvy = vy
+        val maxA = dp(9000f)
+        val smooth = 1f - exp(-dt * 20f)
+        pax += (ax.coerceIn(-maxA, maxA) - pax) * smooth
+        pay += (ay.coerceIn(-maxA, maxA) - pay) * smooth
+
+        // 움직이는 받침점에 매달린 진자: θ'' = -(g·sinθ + ax·cosθ - ay·sinθ)/L - c·θ'
+        val g = dp(1100f)
+        val h = dt / 2f
+        repeat(2) {
+            val acc = -(g * sin(theta) + pax * cos(theta) - pay * sin(theta)) / rope - 1.0f * omega
+            omega += acc * h
+            theta += omega * h
+            if (theta > 2.6f) { theta = 2.6f; omega *= -0.3f } else if (theta < -2.6f) { theta = -2.6f; omega *= -0.3f }
+        }
+
+        // 구(추)의 위치 → 창 위치
+        val bx = px + rope * sin(theta)
+        val by = py + rope * cos(theta)
+        petLp.x = (bx - winW / 2f).coerceIn(0f, (screenW - winW).toFloat()).toInt()
+        petLp.y = (by - topRoom - dpi(sizeDp) / 2f).coerceIn(0f, (screenH - winH).toFloat()).toInt()
         petRoot?.let { wm.updateViewLayout(it, petLp) }
         placeBubble()
     }
 
-    // 짧게 눌렀을 때: 1초 안에 3번 이상이면 특별 반응
+    private fun endDrag() {
+        dragging = false
+        Choreographer.getInstance().removeFrameCallback(frameCb)
+        shadow.animate().alpha(1f).scaleX(1f).setDuration(120).start()
+        // 내려앉은 뒤 살짝 통
+        walkLayer.animate().translationY(0f).setDuration(120).withEndAction { bounce() }.start()
+        if (tired) {
+            tired = false
+            ObjectAnimator.ofPropertyValuesHolder(
+                walkLayer,
+                PropertyValuesHolder.ofFloat(View.SCALE_X, 1f),
+                PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f)
+            ).apply { duration = 250 }.start()
+            say(reliefPhrase)
+        }
+    }
+
+    // ───── 빠르게 흔들면 힘들어함 ─────
+    private fun trackShake(e: MotionEvent) {
+        val now = SystemClock.uptimeMillis()
+        shakeLog.add(Pair(now, hypot(e.rawX - lastMx, e.rawY - lastMy)))
+        shakeLog.removeAll { now - it.first > 500L }
+        val total = shakeLog.sumOf { it.second.toDouble() }
+        if (total >= dp(shakeDistDp) && now - lastTiredAt > 2500L) onTired(now)
+    }
+
+    private fun onTired(now: Long) {
+        lastTiredAt = now
+        tired = true
+        say(tiredPhrases[Random.nextInt(tiredPhrases.size)])
+        // 몸이 납작하게 처지고 파르르
+        ObjectAnimator.ofPropertyValuesHolder(
+            walkLayer,
+            PropertyValuesHolder.ofFloat(View.SCALE_X, 1.1f),
+            PropertyValuesHolder.ofFloat(View.SCALE_Y, 0.85f)
+        ).apply { duration = 200 }.start()
+        shake()
+    }
+
+    // ───── 짧게 눌렀을 때 ─────
+    // 1초 안에 3번 이상이면 특별 반응
     private fun onTap() {
         val now = SystemClock.uptimeMillis()
         tapTimes.removeAll { now - it > 1000L }
@@ -361,22 +534,6 @@ class OverlayService : Service() {
         return i
     }
 
-    // 간지러워서 좌우로 파르르
-    private fun shake() {
-        val a = dp(6f)
-        val b = dp(4f)
-        val c = dp(2f)
-        val tx = PropertyValuesHolder.ofKeyframe(
-            View.TRANSLATION_X,
-            Keyframe.ofFloat(0f, 0f), Keyframe.ofFloat(0.15f, -a), Keyframe.ofFloat(0.3f, a),
-            Keyframe.ofFloat(0.45f, -a), Keyframe.ofFloat(0.6f, b), Keyframe.ofFloat(0.8f, -c),
-            Keyframe.ofFloat(1f, 0f)
-        )
-        ObjectAnimator.ofPropertyValuesHolder(sphere, tx).apply {
-            duration = 450
-        }.start()
-    }
-
     private fun bounce() {
         val sx = PropertyValuesHolder.ofKeyframe(
             View.SCALE_X,
@@ -395,6 +552,22 @@ class OverlayService : Service() {
         )
         ObjectAnimator.ofPropertyValuesHolder(sphere, sx, sy, ty).apply {
             duration = 550
+        }.start()
+    }
+
+    // 좌우로 파르르
+    private fun shake() {
+        val a = dp(6f)
+        val b = dp(4f)
+        val c = dp(2f)
+        val tx = PropertyValuesHolder.ofKeyframe(
+            View.TRANSLATION_X,
+            Keyframe.ofFloat(0f, 0f), Keyframe.ofFloat(0.15f, -a), Keyframe.ofFloat(0.3f, a),
+            Keyframe.ofFloat(0.45f, -a), Keyframe.ofFloat(0.6f, b), Keyframe.ofFloat(0.8f, -c),
+            Keyframe.ofFloat(1f, 0f)
+        )
+        ObjectAnimator.ofPropertyValuesHolder(sphere, tx).apply {
+            duration = 450
         }.start()
     }
 
@@ -422,7 +595,7 @@ class OverlayService : Service() {
         val minX = dpi(8)
         val maxX = maxOf(minX, screenW - w - dpi(8))
         bubbleLp.x = (cx - w / 2).coerceIn(minX, maxX)
-        bubbleLp.y = (petLp.y + topRoom - h - dpi(14)).coerceAtLeast(0)
+        bubbleLp.y = (petLp.y + topRoom - h - dpi(18)).coerceAtLeast(0)
         wm.updateViewLayout(b, bubbleLp)
     }
 }
