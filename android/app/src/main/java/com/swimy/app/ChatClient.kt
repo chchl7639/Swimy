@@ -9,8 +9,12 @@ import java.net.URL
 data class Msg(val role: String, val text: String)
 
 object ChatClient {
-    // 대화에 쓸 모델 (바꾸려면 이 줄만 수정)
-    const val MODEL = "claude-haiku-5-5"
+    const val GEMINI = "gemini"
+    const val CLAUDE = "claude"
+
+    // 모델 이름 (바꾸려면 이 두 줄만 수정)
+    const val GEMINI_MODEL = "gemini-2.5-flash-lite"
+    const val CLAUDE_MODEL = "claude-haiku-5-5"
 
     // 스위미의 성격 (말투를 바꾸고 싶으면 여기를 수정)
     private const val SYSTEM =
@@ -25,57 +29,118 @@ object ChatClient {
         while (history.size > 20) history.removeAt(0)
     }
 
-    fun apiKey(ctx: Context): String =
-        ctx.getSharedPreferences("swimy", Context.MODE_PRIVATE).getString("api_key", "") ?: ""
+    private fun prefs(ctx: Context) = ctx.getSharedPreferences("swimy", Context.MODE_PRIVATE)
 
-    fun saveKey(ctx: Context, key: String) {
-        ctx.getSharedPreferences("swimy", Context.MODE_PRIVATE)
-            .edit().putString("api_key", key.trim()).apply()
+    // ───── 어떤 AI를 쓸지 / 키 저장 (이 폰의 앱 전용 저장소에만 저장) ─────
+    fun provider(ctx: Context): String = prefs(ctx).getString("provider", GEMINI) ?: GEMINI
+
+    fun saveProvider(ctx: Context, p: String) {
+        prefs(ctx).edit().putString("provider", p).apply()
     }
 
-    // 백그라운드 스레드에서만 호출하세요. 실패하면 예외를 던져요.
-    fun ask(key: String, msgs: List<Msg>): String {
+    // 이전 버전에서 저장한 키(api_key)는 Claude 키로 취급해요
+    private fun keyName(p: String) = if (p == CLAUDE) "api_key" else "gemini_key"
+
+    fun apiKey(ctx: Context, p: String = provider(ctx)): String =
+        prefs(ctx).getString(keyName(p), "") ?: ""
+
+    fun saveKey(ctx: Context, p: String, key: String) {
+        prefs(ctx).edit().putString(keyName(p), key.trim()).apply()
+    }
+
+    // ───── 질문하기: 백그라운드 스레드에서만 호출하세요. 실패하면 예외를 던져요. ─────
+    fun ask(provider: String, key: String, msgs: List<Msg>): String =
+        if (provider == CLAUDE) askClaude(key, msgs) else askGemini(key, msgs)
+
+    private fun askGemini(key: String, msgs: List<Msg>): String {
+        val contents = JSONArray()
+        msgs.dropWhile { it.role != "user" }.forEach {
+            contents.put(
+                JSONObject()
+                    .put("role", if (it.role == "assistant") "model" else "user")
+                    .put("parts", JSONArray().put(JSONObject().put("text", it.text)))
+            )
+        }
+        val body = JSONObject()
+            .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", SYSTEM))))
+            .put("contents", contents)
+            .put("generationConfig", JSONObject().put("maxOutputTokens", 400))
+
+        val (code, text) = post(
+            "https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent",
+            mapOf("x-goog-api-key" to key),
+            body
+        )
+        if (code !in 200..299) fail(code, text)
+
+        val parts = JSONObject(text).optJSONArray("candidates")
+            ?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+        val sb = StringBuilder()
+        if (parts != null) {
+            for (i in 0 until parts.length()) sb.append(parts.getJSONObject(i).optString("text"))
+        }
+        return sb.toString().trim().ifEmpty { "음… 그건 뭐라고 해야 할지 모르겠어~" }
+    }
+
+    private fun askClaude(key: String, msgs: List<Msg>): String {
         val arr = JSONArray()
         msgs.dropWhile { it.role != "user" }.forEach {
             arr.put(JSONObject().put("role", it.role).put("content", it.text))
         }
         val body = JSONObject()
-            .put("model", MODEL)
+            .put("model", CLAUDE_MODEL)
             .put("max_tokens", 300)
             .put("system", SYSTEM)
             .put("messages", arr)
 
-        val conn = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
+        val (code, text) = post(
+            "https://api.anthropic.com/v1/messages",
+            mapOf("x-api-key" to key, "anthropic-version" to "2023-06-01"),
+            body
+        )
+        if (code !in 200..299) fail(code, text)
+
+        val content = JSONObject(text).getJSONArray("content")
+        val sb = StringBuilder()
+        for (i in 0 until content.length()) {
+            val block = content.getJSONObject(i)
+            if (block.optString("type") == "text") sb.append(block.optString("text"))
+        }
+        return sb.toString().trim().ifEmpty { "…" }
+    }
+
+    // ───── 공통 ─────
+    private fun post(url: String, headers: Map<String, String>, body: JSONObject): Pair<Int, String> {
+        val conn = URL(url).openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "POST"
             conn.connectTimeout = 15000
             conn.readTimeout = 60000
             conn.doOutput = true
             conn.setRequestProperty("content-type", "application/json")
-            conn.setRequestProperty("x-api-key", key)
-            conn.setRequestProperty("anthropic-version", "2023-06-01")
+            headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
             conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-            if (code !in 200..299) {
-                val msg = try {
-                    JSONObject(text).optJSONObject("error")?.optString("message") ?: text
-                } catch (e: Exception) {
-                    text
-                }
-                throw Exception("오류 $code: $msg")
-            }
-            val content = JSONObject(text).getJSONArray("content")
-            val sb = StringBuilder()
-            for (i in 0 until content.length()) {
-                val block = content.getJSONObject(i)
-                if (block.optString("type") == "text") sb.append(block.optString("text"))
-            }
-            return sb.toString().trim().ifEmpty { "…" }
+            return Pair(code, text)
         } finally {
             conn.disconnect()
         }
+    }
+
+    private fun fail(code: Int, text: String): Nothing {
+        val msg = try {
+            JSONObject(text).optJSONObject("error")?.optString("message") ?: text
+        } catch (e: Exception) {
+            text
+        }
+        throw Exception(
+            when (code) {
+                429 -> "무료 사용 한도에 걸렸어. 잠시 뒤에 다시 말 걸어줘~"
+                401, 403 -> "키가 맞는지 확인해줘 ($code)"
+                else -> "오류 $code: $msg"
+            }
+        )
     }
 }

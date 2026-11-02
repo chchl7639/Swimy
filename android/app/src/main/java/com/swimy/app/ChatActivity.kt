@@ -123,7 +123,8 @@ class ChatActivity : Activity() {
         input.setText("")
         addBubble("user", text)
 
-        val key = ChatClient.apiKey(this)
+        val provider = ChatClient.provider(this)
+        val key = ChatClient.apiKey(this, provider)
         if (key.isBlank()) {
             addBubble("assistant", "아직 API 키가 없어! 스위미 앱 첫 화면에서 키를 저장해 줘~")
             return
@@ -137,7 +138,7 @@ class ChatActivity : Activity() {
         val snapshot = ChatClient.history.toList()
 
         Thread {
-            val result = runCatching { ChatClient.ask(key, snapshot) }
+            val result = runCatching { ChatClient.ask(provider, key, snapshot) }
             runOnUiThread {
                 waiting = false
                 sendBtn.isEnabled = true
