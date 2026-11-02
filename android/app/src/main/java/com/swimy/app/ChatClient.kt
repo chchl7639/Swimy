@@ -13,7 +13,7 @@ object ChatClient {
     const val CLAUDE = "claude"
 
     // 모델 이름 (바꾸려면 이 두 줄만 수정)
-    const val GEMINI_MODEL = "gemini-2.5-flash-lite"
+    const val GEMINI_MODEL = "gemini-3.5-flash-lite"
     const val CLAUDE_MODEL = "claude-haiku-5-5"
 
     // 스위미의 성격 (말투를 바꾸고 싶으면 여기를 수정)
