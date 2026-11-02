@@ -49,7 +49,7 @@ class OverlayService : Service() {
     // ───── 문구 ─────
     private val phrases = listOf("안녕! 나 여기 있어~", "간질간질해, 헤헤", "오늘도 같이 힘내자!")
     // 0.5초 안에 3번 이상 연속 터치했을 때 (떼쓰기)
-    private val whinePhrases = listOf("아앙~ 그만해~ 어지럽단 말이야!", "으아앙~ 어지러워어~ 그만~!", "싫어싫어~ 간지러워서 어지러워!")
+    private val whinePhrases = listOf("이익... 그만해~ 어지럽단 말이야!", "으아앙~ 어지러워어~ 그만~!", "싫어싫어~ 간지러워서 어지러워!")
     // 집은 채 빠르게 흔들었을 때
     private val tiredPhrases = listOf("으으… 어지러워 😵", "그만~ 멀미 나…", "으아… 힘들어…")
     // 집은 채 한 바퀴 돌렸을 때 (또 해달라고 조르기)
@@ -80,19 +80,19 @@ class OverlayService : Service() {
     private val lunchPhrases = listOf("밥 먹었어~? 배고프다~", "점심 뭐 먹을 거야~?", "밥은 챙겨 먹어야지~")
     private val nightPhrases = listOf("아직 안 자~? 늦었는데~", "슬슬 자야 하는 거 아니야~?", "밤이 깊었다~ 눈 좀 쉬게 하자")
 
-    // 답을 기다리는 동안 말풍선에 뜨는 소리 (뒤에 ... 이 점점 늘어나요. 가끔 ? 도 붙어요)
-    private val thinkingBases = listOf("음", "으음", "으이이", "흐으음", "으으음", "어디 보자")
+    // 답을 기다리는 동안 말풍선에 뜨는 소리 (뒤에 ... 이 점점 늘어나요)
+    private val thinkingBases = listOf("")
 
     // 열려 있는 앱에 반응 (앱 이름만 확인해요. 화면 내용은 읽지 않아요)
     private val appReactions: Map<String, List<String>> = mapOf(
         "com.google.android.youtube" to listOf("유튜브 보는 거야~? 뭐 보는데~", "나도 같이 볼래~"),
+        "com.google.android.apps.youtube.music" to listOf("노래 듣는 거야~? 신난다~", "어떤 노래 들을거야? 나도 들려줘~"),
         "com.kakao.talk" to listOf("누구랑 얘기해~?", "카톡 답장 잘 해~"),
         "com.instagram.android" to listOf("인스타 구경 중이네~", "예쁜 거 많이 봤어~?"),
         "com.android.chrome" to listOf("뭐 검색하는 거야~?", "오~ 인터넷 서핑이다~"),
         "com.sec.android.app.sbrowser" to listOf("뭐 검색하는 거야~?", "오~ 인터넷 서핑이다~"),
         "com.netflix.mediaclient" to listOf("넷플릭스다~ 뭐 볼 건데~", "오늘은 어떤 걸 볼까~"),
         "com.nhn.android.search" to listOf("뭐 찾아보는 거야~?", "검색 열심히 하네~"),
-        "com.youtube.music" to listOf("노래 듣는 거야~? 신난다~", "어떤 노래야~? 나도 들려줘~"),
         "com.sec.android.app.camera" to listOf("사진 찍는 거야~? 나도 찍어줘~", "치즈~!"),
         "com.sec.android.gallery3d" to listOf("사진 구경 중이야~?", "추억 여행이다~"),
         "com.google.android.apps.maps" to listOf("어디 가는 거야~?", "길 잃으면 안 돼~"),
@@ -234,8 +234,7 @@ class OverlayService : Service() {
                 return
             }
             thinkDots = thinkDots % 3 + 1
-            val q = if (thinkQ && thinkDots == 3) "?" else ""
-            say(thinkBase + ".".repeat(thinkDots) + q, 5000L)
+            val q = if (thinkQ && thinkDots == 3) say(thinkBase + ".".repeat(thinkDots) + q, 5000L)
             handler.postDelayed(this, 450L)
         }
     }
@@ -264,7 +263,7 @@ class OverlayService : Service() {
         scheduleMove()
     }
 
-    // 답을 기다리는 동안: "음.", "음..", "음..." 처럼 점이 늘어나는 로딩 표시 (소리는 매번 조금씩 달라요)
+    // 답을 기다리는 동안: ".", "..", "..." 처럼 점이 늘어나는 로딩 표시
     fun thinkingBubble() {
         thinkingActive = true
         thinkBase = thinkingBases[Random.nextInt(thinkingBases.size)]
