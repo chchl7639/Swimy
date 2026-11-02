@@ -86,7 +86,6 @@ class OverlayService : Service() {
     // 열려 있는 앱에 반응 (앱 이름만 확인해요. 화면 내용은 읽지 않아요)
     private val appReactions: Map<String, List<String>> = mapOf(
         "com.google.android.youtube" to listOf("유튜브 보는 거야~? 뭐 보는데~", "나도 같이 볼래~"),
-        "com.google.android.apps.youtube.music" to listOf("노래 듣는 거야~? 신난다~", "어떤 노래 들을거야? 나도 들려줘~"),
         "com.kakao.talk" to listOf("누구랑 얘기해~?", "카톡 답장 잘 해~"),
         "com.instagram.android" to listOf("인스타 구경 중이네~", "예쁜 거 많이 봤어~?"),
         "com.android.chrome" to listOf("뭐 검색하는 거야~?", "오~ 인터넷 서핑이다~"),
