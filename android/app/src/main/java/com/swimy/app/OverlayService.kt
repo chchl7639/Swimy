@@ -71,10 +71,10 @@ class OverlayService : Service() {
 
     // 혼자서 가끔 하는 말 (이모지 없이 부드럽게. 마음대로 추가/삭제하세요)
     private val idlePhrases = listOf(
-        "심심하다~", "음... 뭐 재밌는 거 없나~", "나 여기 있는데~ 아무도 안 놀아주네~",
-        "오늘 뭐 했어~?", "물 한 잔 마시고 와~", "으쌰~ 스트레칭 한번 할까?",
-        "혼자 굴러다니는 중~", "너 지금 뭐 해~?", "나 좀 눌러봐~ 간질간질할 거야",
-        "휴~ 잠깐 쉬었다 가자~"
+        "심심하다~", "음... 뭐 재밌는 거 없나~", "누가 그네 안 태워주나~",
+        "오늘 뭐 했어~?", "오늘 기분 어때?", "으쌰~ 스트레칭 한번 할까?",
+        "데굴데굴...", "너 지금 뭐 해~?", "나 좀 눌러봐~ 간질간질할 거야",
+        "자는 건 아니지~?"
     )
     private val morningPhrases = listOf("좋은 아침~ 잘 잤어?", "일어났어~? 오늘도 힘내자!", "아침이다~ 물부터 한 잔 마시자~")
     private val lunchPhrases = listOf("밥 먹었어~? 배고프다~", "점심 뭐 먹을 거야~?", "밥은 챙겨 먹어야지~")
@@ -92,12 +92,12 @@ class OverlayService : Service() {
         "com.sec.android.app.sbrowser" to listOf("뭐 검색하는 거야~?", "오~ 인터넷 서핑이다~"),
         "com.netflix.mediaclient" to listOf("넷플릭스다~ 뭐 볼 건데~", "오늘은 어떤 걸 볼까~"),
         "com.nhn.android.search" to listOf("뭐 찾아보는 거야~?", "검색 열심히 하네~"),
-        "com.spotify.music" to listOf("노래 듣는 거야~? 신난다~", "어떤 노래야~? 나도 들려줘~"),
+        "com.youtube.music" to listOf("노래 듣는 거야~? 신난다~", "어떤 노래야~? 나도 들려줘~"),
         "com.sec.android.app.camera" to listOf("사진 찍는 거야~? 나도 찍어줘~", "치즈~!"),
         "com.sec.android.gallery3d" to listOf("사진 구경 중이야~?", "추억 여행이다~"),
         "com.google.android.apps.maps" to listOf("어디 가는 거야~?", "길 잃으면 안 돼~"),
         "com.android.vending" to listOf("새 앱 구경 중이야~?", "뭐 설치하려고~?"),
-        "com.github.android" to listOf("오~ 코딩하는 거야~? 멋있다~", "우리 스위미 만든 곳이다~"),
+        "com.github.android" to listOf("오~ 코딩하는 거야~? 멋있다~", "내가 만들어진 곳이다~"),
         "com.anthropic.claude" to listOf("Claude 만나러 갔네~", "나 말고 다른 AI랑 얘기하는 거야~? 질투난다~"),
         "com.zhiliaoapp.musically" to listOf("틱톡 보는 거야~? 시간 순삭이다~", "그만 보고 눈 좀 쉬자~"),
         "com.twitter.android" to listOf("트윗 구경 중이야~?", "오늘은 무슨 일 있대~?"),
