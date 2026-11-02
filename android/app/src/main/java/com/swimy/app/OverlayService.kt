@@ -59,6 +59,11 @@ class OverlayService : Service() {
     private val staggerPhrase = "으으… 세상이 빙글빙글…"
     private val againPhrase = "한 번만 더 돌려줘~ 응? 응?"        // 한 바퀴 돌리고 내려놓았을 때
     private val happyEndPhrase = "재밌었다~ 또 태워줘!"            // 그네 탄 뒤 내려놓았을 때
+    // 그네를 크게(약 75°~140°) 태웠을 때
+    private val swingHighPhrases = listOf("더 높이! 더 높이!", "우와~ 나는 거 같아!", "하늘까지 닿겠다~!")
+    // 그네를 아주 크게(약 140°~180°) 태웠을 때
+    private val swingScaryPhrases = listOf("약간 무서운데…?", "으아~ 너무 높아! 살살~", "떨어지겠어… 꽉 잡아줘!")
+    private val scaryEndPhrase = "아까 진짜 무서웠어… 그래도 재밌었다!"
 
     // ───── 설정 (여기 값만 바꿔도 느낌이 달라져요) ─────
     private val swimiColor = Color.parseColor("#6C8CFF")
@@ -78,9 +83,10 @@ class OverlayService : Service() {
     private val spinLightTurns = 1f     // 이 바퀴 수부터 또 해달라고 조름
     private val spinSickTurns = 2.5f    // 이 바퀴 수부터 토
     private val tapWindowMs = 500L      // 마지막 터치 후 이 시간이 지나면 터치 횟수로 반응 결정
-    private val swingMinRad = 0.2f      // 그네 감지: 좌우로 이 각도 이상(약 11°)
-    private val swingMaxRad = 1.3f      // 그네 감지: 이 각도 이하(약 75°)여야 '약하게'
-    private val swingNeed = 4           // 그네 감지: 반대편으로 이 횟수만큼 왕복(편도 기준)
+    private val swingMinRad = 0.2f      // 그네: 좌우로 이 각도 이상(약 11°)이면 반응
+    private val swingMaxRad = 1.3f      // 이 각도(약 75°)를 넘으면 '크게 흔든 것'으로 반응
+    private val swingScaryRad = 2.4f    // 이 각도(약 140°)를 넘으면 '아주 크게'(무서워함)
+    private val swingNeed = 4           // 약한 그네: 반대편으로 이 횟수만큼 왕복(편도 기준). 큰 그네는 2번이면 반응
 
     // ───── 내부 상태 ─────
     private lateinit var wm: WindowManager
@@ -122,6 +128,8 @@ class OverlayService : Service() {
     private var swingCount = 0
     private var lastTurnSign = 0
     private var lastTurnMs = 0L
+    private var swingPeak = 0f       // 이번 왕복에서 가장 크게 간 각도
+    private var swingTierShown = 0   // 이번에 집은 동안 보여 준 그네 반응 단계(0~3)
 
     // 진자 물리
     private var px = 0f              // 받침점 위치
@@ -171,6 +179,28 @@ class OverlayService : Service() {
         }
     }
 
+    companion object {
+        // 대화창(ChatActivity)이 스위미의 말풍선을 쓰기 위한 연결
+        var instance: OverlayService? = null
+    }
+
+    var chatOpen = false   // 대화창이 열려 있는 동안은 돌아다니지 않아요
+
+    fun onChatOpened() {
+        chatOpen = true
+        say("응? 나 불렀어? 무슨 얘기할까~")
+    }
+
+    fun onChatClosed() {
+        chatOpen = false
+        scheduleMove()
+    }
+
+    fun thinkingBubble() = say("으으으으음....???", 30000L)
+
+    fun replyBubble(text: String) =
+        say(text, (1800L + text.length * 90L).coerceAtMost(15000L))
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -182,6 +212,7 @@ class OverlayService : Service() {
         }
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         createViews()
+        instance = this
         scheduleMove()
     }
 
@@ -192,6 +223,7 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         alive = false
+        instance = null
         handler.removeCallbacksAndMessages(null)
         Choreographer.getInstance().removeFrameCallback(frameCb)
         moveAnim?.cancel()
@@ -339,7 +371,7 @@ class OverlayService : Service() {
     }
 
     private fun walkOnce() {
-        if (dragging || touching) {
+        if (dragging || touching || chatOpen) {
             scheduleMove()
             return
         }
@@ -348,8 +380,13 @@ class OverlayService : Service() {
         val y0 = petLp.y.toFloat()
         val angle = rand(0f, (2 * Math.PI).toFloat())   // 무작위 방향
         val dist = dp(rand(60f, 160f))                  // 무작위 거리
-        val x1 = clampX(x0 + cos(angle) * dist)
-        val y1 = clampY(y0 + sin(angle) * dist)
+        walkTo(clampX(x0 + cos(angle) * dist), clampY(y0 + sin(angle) * dist))
+    }
+
+    // (x1, y1)까지 걸어가기
+    private fun walkTo(x1: Float, y1: Float) {
+        val x0 = petLp.x.toFloat()
+        val y0 = petLp.y.toFloat()
         val real = hypot(x1 - x0, y1 - y0)
         if (real < dp(20f)) {
             scheduleMove()
@@ -476,6 +513,8 @@ class OverlayService : Service() {
         prevOmega = 0f
         swingCount = 0
         lastTurnSign = 0
+        swingPeak = 0f
+        swingTierShown = 0
         pendingTaps = 0
         handler.removeCallbacks(tapDecideRunnable)
         lastFrameNs = System.nanoTime()
@@ -579,6 +618,7 @@ class OverlayService : Service() {
         val level = dizzyLevel
         val wasTired = tired
         val wasHappy = happy
+        val wasTier = swingTierShown
         tired = false
         dizzyLevel = 0
         happy = false
@@ -610,7 +650,7 @@ class OverlayService : Service() {
                 bounce()
             }
             wasHappy -> {                         // 그네 탄 뒤: 또 태워달라고
-                say(happyEndPhrase)
+                say(if (wasTier >= 3) scaryEndPhrase else happyEndPhrase)
                 bounce()
             }
             else -> bounce()                      // 그냥 내려놓음
@@ -652,38 +692,63 @@ class OverlayService : Service() {
         }
     }
 
-    // 그네 감지: 약하게 좌우로 몇 번 왕복하면 좋아함
+    // 그네 감지: 좌우로 왕복하면 각도에 따라 반응 (약하게=좋아함, 크게=신남, 거의 180°=무서워함)
     private fun detectSwing(nowMs: Long) {
         if (prevOmega * omega < 0f) {            // 방향이 바뀌는 순간 = 가장 멀리 간 순간
             val twoPi = (2 * Math.PI).toFloat()
             val w = theta - twoPi * Math.round(theta / twoPi).toFloat()  // 여러 바퀴 돈 뒤에도 -π..π로 환산
             val sign = if (w > 0f) 1 else -1
-            val ok = abs(w) in swingMinRad..swingMaxRad
+            val amp = abs(w)
+            val ok = amp >= swingMinRad
             if (ok && sign != lastTurnSign && nowMs - lastTurnMs < 1300L) {
                 swingCount++
+                swingPeak = maxOf(swingPeak, amp)
             } else {
                 swingCount = if (ok) 1 else 0
+                swingPeak = if (ok) amp else 0f
             }
             lastTurnSign = if (ok) sign else 0
             lastTurnMs = nowMs
-            if (swingCount >= swingNeed && dizzyLevel == 0 && !tired && nowMs - lastHappyAt > 5000L) {
+
+            val tier = when {
+                swingPeak > swingScaryRad -> 3
+                swingPeak > swingMaxRad -> 2
+                else -> 1
+            }
+            val need = if (tier >= 2) 2 else swingNeed
+            val allowed = dizzyLevel == 0 && (tier >= 2 || !tired)
+            if (swingCount >= need && allowed && (tier > swingTierShown || nowMs - lastHappyAt > 5000L)) {
                 swingCount = 0
-                onHappySwing(nowMs)
+                swingPeak = 0f
+                onSwingReaction(tier, nowMs)
             }
         }
         prevOmega = omega
     }
 
-    private fun onHappySwing(now: Long) {
+    private fun onSwingReaction(tier: Int, now: Long) {
         lastHappyAt = now
+        swingTierShown = maxOf(swingTierShown, tier)
         happy = true
-        say(swingPhrases[Random.nextInt(swingPhrases.size)])
-        joyHop()
+        when (tier) {
+            1 -> {
+                say(swingPhrases[Random.nextInt(swingPhrases.size)])
+                joyHop()
+            }
+            2 -> {
+                say(swingHighPhrases[Random.nextInt(swingHighPhrases.size)])
+                joyHop(16f)
+            }
+            else -> {
+                say(swingScaryPhrases[Random.nextInt(swingScaryPhrases.size)])
+                shake()
+            }
+        }
     }
 
     // 신나서 콩콩
-    private fun joyHop() {
-        val up = -dp(9f)
+    private fun joyHop(heightDp: Float = 9f) {
+        val up = -dp(heightDp)
         val ty = PropertyValuesHolder.ofKeyframe(
             View.TRANSLATION_Y,
             Keyframe.ofFloat(0f, 0f), Keyframe.ofFloat(0.25f, up), Keyframe.ofFloat(0.5f, 0f),
@@ -747,6 +812,10 @@ class OverlayService : Service() {
     }
 
     private fun openChat() {
+        // 입력줄과 키보드에 가리지 않게 스위미를 화면 위쪽으로 올려 둠
+        updateScreen()
+        val target = clampY(screenH * 0.3f)
+        if (petLp.y > target) walkTo(petLp.x.toFloat(), target)
         try {
             startActivity(Intent(this, ChatActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         } catch (e: Exception) {
@@ -800,18 +869,20 @@ class OverlayService : Service() {
     }
 
     // ───── 말풍선 ─────
-    private fun say(text: String) {
+    private fun say(text: String, ms: Long = bubbleMs) {
         val b = bubble ?: return
         updateScreen()
         b.text = text
+        val maxW = (screenW * 0.7f).toInt()
+        b.maxWidth = maxW
         b.measure(
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         )
         b.visibility = View.VISIBLE
         placeBubble()
         handler.removeCallbacks(hideBubble)
-        handler.postDelayed(hideBubble, bubbleMs)
+        handler.postDelayed(hideBubble, ms)
     }
 
     private fun placeBubble() {
