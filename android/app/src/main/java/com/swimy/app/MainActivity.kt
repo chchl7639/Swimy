@@ -12,6 +12,7 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.RadioButton
@@ -20,6 +21,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 
 class MainActivity : Activity() {
+
+    private lateinit var usageStatus: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +46,23 @@ class MainActivity : Activity() {
             text = "스위미 숨기기"
             setOnClickListener { stopService(Intent(this@MainActivity, OverlayService::class.java)) }
         }
+
+        // ───── 혼잣말 / 앱 반응 ─────
+        val cbIdle = CheckBox(this).apply {
+            text = "혼자서 가끔 말 걸기·혼잣말"
+            isChecked = ChatClient.flag(this@MainActivity, "idle_on")
+            setOnCheckedChangeListener { _, c -> ChatClient.setFlag(this@MainActivity, "idle_on", c) }
+        }
+        val cbReact = CheckBox(this).apply {
+            text = "열려 있는 앱에 반응하기"
+            isChecked = ChatClient.flag(this@MainActivity, "react_on")
+            setOnCheckedChangeListener { _, c -> ChatClient.setFlag(this@MainActivity, "react_on", c) }
+        }
+        val usageBtn = Button(this).apply {
+            text = "앱 반응 권한 열기 (사용 정보 접근)"
+            setOnClickListener { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+        }
+        usageStatus = TextView(this).apply { textSize = 13f }
 
         // ───── 대화용 AI 선택 + API 키 (이 폰의 앱 전용 저장소에만 저장돼요) ─────
         val aiLabel = TextView(this).apply {
@@ -97,15 +117,25 @@ class MainActivity : Activity() {
                 }
             }
         }
+        val shareHint = TextView(this).apply {
+            text = "팁: 다른 앱에서 글이나 그림을 '공유 → 스위미'로 보내면 스위미가 읽고 요약·설명해 줘요."
+            textSize = 13f
+            setPadding(0, pad, 0, 0)
+        }
 
         root.addView(info)
         root.addView(start)
         root.addView(stop)
+        root.addView(cbIdle)
+        root.addView(cbReact)
+        root.addView(usageBtn)
+        root.addView(usageStatus)
         root.addView(aiLabel)
         root.addView(group)
         root.addView(keyInput)
         root.addView(save)
         root.addView(status)
+        root.addView(shareHint)
         setContentView(ScrollView(this).apply {
             isFillViewport = true
             addView(root)
@@ -115,6 +145,15 @@ class MainActivity : Activity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        usageStatus.text = if (Perm.hasUsageAccess(this)) {
+            "앱 반응 권한: 켜짐 ✓ (앱 이름만 확인하고, 화면 내용은 읽지 않아요)"
+        } else {
+            "앱 반응 권한: 꺼짐"
         }
     }
 
